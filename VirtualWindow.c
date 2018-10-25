@@ -4,6 +4,9 @@
 #include <gst/gst.h>
 #include <gst/video/videooverlay.h>
 
+#include <pthread.h>
+#include <gst/rtsp-server/rtsp-server.h>
+
 #include <gdk/gdk.h>
 #if defined (GDK_WINDOWING_X11)
 #include <gdk/gdkx.h>
@@ -12,6 +15,10 @@
 #elif defined (GDK_WINDOWING_QUARTZ)
 #include <gdk/gdkquartz.h>
 #endif
+
+
+#define DEFAULT_RTSP_PORT "8554"
+static char *port= (char *) DEFAULT_RTSP_PORT;
 
 /* Structure to contain all our information, so we can pass it around */
 typedef struct _CustomData {
@@ -32,6 +39,7 @@ typedef struct _CustomData {
 
 /* global window_handle pointer (needed for linking our glimagsink to the gui window */
 static guintptr window_handle = 0;
+
 
 static void clock_lost_cb(GstBus* bus, GstMessage *msg, CustomData *data) {
   g_print ("Clock lost message occured!");
@@ -196,7 +204,7 @@ static void create_ui (CustomData *data) {
   gtk_box_pack_start (GTK_BOX (main_box), main_hbox, TRUE, TRUE, 0);
   gtk_box_pack_start (GTK_BOX (main_box), controls, FALSE, FALSE, 0);
   gtk_container_add (GTK_CONTAINER (main_window), main_box);
-  gtk_window_set_default_size (GTK_WINDOW (main_window), 1280, 720);
+  gtk_window_set_default_size (GTK_WINDOW (main_window), 1920, 1080);
 
   gtk_widget_show_all (main_window);
 }
@@ -376,6 +384,49 @@ static void error_cb (GstBus *bus, GstMessage *msg, CustomData *data) {
  // gst_element_set_state (data->playbin, GST_STATE_NULL);
 }
 
+/* This thread handles the startup and running of the rtsp server side */
+void rtsp_server(void)
+{
+  GMainLoop *loop;
+  GstRTSPServer *server;
+  GstRTSPMountPoints *mounts;
+  GstRTSPMediaFactory *factory;
+
+  /* create main loop */
+  loop = g_main_loop_new (NULL, FALSE);
+
+  /* create a server instance */
+  server = gst_rtsp_server_new ();
+  gst_rtsp_server_set_address(server, "10.252.61.91");
+  g_object_set (server, "service", port, NULL);
+
+  /* get the mount points for this server, every server has a default object
+   * that be used to map uri mount points to media factories */
+  mounts = gst_rtsp_server_get_mount_points (server);
+
+  /* make a media factory for a test stream. The default media factory can use
+   * gst-launch syntax to create pipelines.
+   * any launch line works as long as it contains elements named pay%d. Each
+   * element with pay%d names will be a stream */
+  factory = gst_rtsp_media_factory_new ();
+  gst_rtsp_media_factory_set_launch (factory, "v4l2src ! video/x-raw, width=1920, height=1080, framerate=30/1 ! queue max-size-buffers=1 leaky=downstream ! omxh264enc ! video/x-h264, stream-format=byte-stream, alignment=au, profile=high ! h264parse ! rtph264pay name=pay0 pt=96 ");
+
+  /* make rtsp-server available for multiple clients */
+  gst_rtsp_media_factory_set_shared(factory, TRUE);
+
+  /* attach the test factory to the /test url */
+  gst_rtsp_mount_points_add_factory (mounts, "/test", factory);
+
+  /* don't need the ref to the mapper anymore */
+  g_object_unref (mounts);
+
+  /* attach the server to the default maincontext */
+  gst_rtsp_server_attach (server, NULL);
+
+  /* start serving */
+  g_print ("stream ready at rtsp://10.252.61.91:%s/test\n", port);
+}
+
 
 int main(int argc, char *argv[]) {
   CustomData data;
@@ -384,6 +435,7 @@ int main(int argc, char *argv[]) {
   gchar *pipe_desc;
   GError *error=NULL;
   GstMessage *msg;
+  pthread_t rtsp_server_thread;
 
  
  /* Initialize GTK */
@@ -395,11 +447,15 @@ int main(int argc, char *argv[]) {
   /* Initialize our data structure */
   memset (&data, 0, sizeof (data));
   data.duration = GST_CLOCK_TIME_NONE;
+  
+   /* Start rtsp-server-thread */
+//  pthread_create ( &rtsp_server_thread, NULL, (void* )rtsp_server, NULL );
+
 
   /* Create the elements */
   //pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test  latency=0 ! rtpjitterbuffer latency=2 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=24/1' ! omxh264dec ! glimagesink sync=false");
  // pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test  latency=0 ! rtpjitterbuffer latency=2 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=90/1' ! omxh264dec ! glimagesink sync=false");
-  pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test latency=0 do-retransmission=false ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=15/1' ! omxh264dec ! glimagesink sync=false async=false");
+  pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test latency=0 do-retransmission=false ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false");
   data.playbin=gst_parse_launch(pipe_desc, &error);
   g_free(pipe_desc);
 
