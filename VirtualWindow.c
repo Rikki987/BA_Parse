@@ -455,7 +455,8 @@ int main(int argc, char *argv[]) {
   /* Create the elements */
   //pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test  latency=0 ! rtpjitterbuffer latency=2 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=24/1' ! omxh264dec ! glimagesink sync=false");
  // pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test  latency=0 ! rtpjitterbuffer latency=2 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=90/1' ! omxh264dec ! glimagesink sync=false");
-  pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test latency=0 do-retransmission=false ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false");
+  pipe_desc= g_strdup_printf("rtspsrc location=rtsp://169.254.197.5:8554/test latency=0 do-retransmission=false user-id=user user-pw=password ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false");
+ // pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test latency=0 do-retransmission=false user-id=user user-pw=password ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false");
   data.playbin=gst_parse_launch(pipe_desc, &error);
   g_free(pipe_desc);
 
