@@ -6,6 +6,7 @@
 
 #include <pthread.h>
 #include <gst/rtsp-server/rtsp-server.h>
+#include <X11/Xlib.h>
 
 #include <gdk/gdk.h>
 #if defined (GDK_WINDOWING_X11)
@@ -20,9 +21,15 @@
 #define DEFAULT_RTSP_PORT "8554"
 static char *port= (char *) DEFAULT_RTSP_PORT;
 
+//static GstVideoOverlay *overlay;
+//static GstVideoOverlay *overlay2;
+
 /* Structure to contain all our information, so we can pass it around */
 typedef struct _CustomData {
   GstElement *playbin;           /* Our one and only pipeline */
+  GstElement *playbin2;           /* Our one and only pipeline */
+
+  GstElement *queue; 		 /* Queue element to monitor if pipeline is alive */
 
   GtkWidget *slider;              /* Slider widget to keep track of current position */
   GtkWidget *streams_list;        /* Text widget to display info about the streams */
@@ -34,21 +41,24 @@ typedef struct _CustomData {
   gboolean terminate;             /* Should we terminate execution? */
   gboolean playing; 		  /* */
 
+  GstBus *bus2;
   GstBus *bus;
 } CustomData;
 
 /* global window_handle pointer (needed for linking our glimagsink to the gui window */
 static guintptr window_handle = 0;
 
+static gboolean rtsp_client (CustomData *data);
 
-static void clock_lost_cb(GstBus* bus, GstMessage *msg, CustomData *data) {
-  g_print ("Clock lost message occured!");
+static void underrun_handler(GstBus* bus, GstMessage *msg, CustomData *data) {
+  g_print ("Underrun message occured!");
+//  gst_element_set_state (data->playbin, GST_STATE_PAUSED);
 }
 
-static void buffering_cb(GstBus* bus, GstMessage *msg, CustomData *data) {
-  g_print ("Buffering message occured!");
+static void running_handler(GstBus* bus, GstMessage *msg, CustomData *data) {
+  g_print ("Running message occured!");
+  //gst_element_set_state (data->playbin, GST_STATE_PLAYING);
 }
-
 
 /* This function is called when the glimagesink element posts a prepare-window-handle message
  * -> bus sync handler will be called from the streaming thread directly
@@ -74,7 +84,6 @@ static GstBusSyncReply bus_sync_handler (GstBus * bus, GstMessage * message, gpo
  return GST_BUS_DROP;
 }
 
-
 /* This function is called when the GUI toolkit creates the physical window that will hold the video.
  * At this point we can retrieve its handler (which has a different meaning depending on the windowing system)
  * and pass it to GStreamer through the VideoOverlay interface. */
@@ -88,15 +97,19 @@ static void realize_cb (GtkWidget *widget, CustomData *data) {
   /* Retrieve window handler from GDK */
 #if defined (GDK_WINDOWING_WIN32)
   window_handle = (guintptr)GDK_WINDOW_HWND (window);
+//  window_handle2 = (guintptr)GDK_WINDOW_HWND (window);
 #elif defined (GDK_WINDOWING_QUARTZ)
   window_handle = gdk_quartz_window_get_nsview (window);
+ // window_handle2 = gdk_quartz_window_get_nsview (window);
 #elif defined (GDK_WINDOWING_X11)
   window_handle = GDK_WINDOW_XID (window);
+//  window_handle2 = GDK_WINDOW_XID (window);
 #endif
 
  // g_object_get (data->playbin->sink, "widget", &widget, NULL);
 
   /* Pass it to playbin, which implements VideoOverlay and will forward it to the video sink */
+  gst_video_overlay_set_window_handle (GST_VIDEO_OVERLAY (data->playbin2), window_handle);
   gst_video_overlay_set_window_handle (GST_VIDEO_OVERLAY (data->playbin), window_handle);
 }
 
@@ -114,20 +127,15 @@ static void pause_cb (GtkButton *button, CustomData *data) {
 /* This function is called when the STOP button is clicked */
 static void stop_cb (GtkButton *button, CustomData *data) {
   //gst_element_set_state (data->playbin, GST_STATE_NULL);
+  gst_element_set_state (data->playbin2, GST_STATE_READY);
   gst_element_set_state (data->playbin, GST_STATE_READY);
-    /* Start playing */
-  /*ret=gst_element_set_state (data.playbin, GST_STATE_PLAYING);
-  if (ret==GST_STATE_CHANGE_FAILURE) {
-    g_printerr ("Unable to set the pipeline to the playing state.\n");
-    gst_object_unref (data.playbin);
 
-    return -1;
-  }*/
 }
 
 /* This function is called when the main window is closed */
 static void delete_event_cb (GtkWidget *widget, GdkEvent *event, CustomData *data) {
   stop_cb (NULL, data);
+  //overlay=NULL;
   gtk_main_quit ();
 }
 
@@ -135,18 +143,15 @@ static void delete_event_cb (GtkWidget *widget, GdkEvent *event, CustomData *dat
  * rescaling, etc). GStreamer takes care of this in the PAUSED and PLAYING states, otherwise,
  * we simply draw a black rectangle to avoid garbage showing up. */
 static gboolean draw_cb (GtkWidget *widget, cairo_t *cr, CustomData *data) {
+  GtkAllocation allocation;
   if (data->state < GST_STATE_PAUSED) {
-    GtkAllocation allocation;
-
-    /* Cairo is a 2D graphics library which we use here to clean the video window.
-     * It is used by GStreamer for other reasons, so it will always be available to us. */
-    gtk_widget_get_allocation (widget, &allocation);
+  gtk_widget_get_allocation(widget, &allocation);
     cairo_set_source_rgb (cr, 0, 0, 0);
-    cairo_rectangle (cr, 0, 0, allocation.width, allocation.height);
+    cairo_rectangle (cr, 0, 0, 1900, 1040);
     cairo_fill (cr);
   }
 
-  return FALSE;
+ return FALSE;
 }
 
 /* This function is called when the slider changes its position. We perform a seek to the
@@ -169,7 +174,7 @@ static void create_ui (CustomData *data) {
   main_window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
   g_signal_connect (G_OBJECT (main_window), "delete-event", G_CALLBACK (delete_event_cb), data);
 
-  video_window = gtk_drawing_area_new ();
+  video_window = gtk_drawing_area_new();
   gtk_widget_set_double_buffered (video_window, FALSE);
   g_signal_connect (video_window, "realize", G_CALLBACK (realize_cb), data);
   g_signal_connect (video_window, "draw", G_CALLBACK (draw_cb), data);
@@ -220,7 +225,7 @@ static gboolean refresh_ui (CustomData *data) {
   /* If we didn't know it yet, query the stream duration */
   if (!GST_CLOCK_TIME_IS_VALID (data->duration)) {
     if (!gst_element_query_duration (data->playbin, GST_FORMAT_TIME, &data->duration)) {
-      g_printerr ("Could not query current duration.\n");
+      //g_printerr ("Could not query current duration.\n");
     } else {
       /* Set the range of the slider to the clip duration, in SECONDS */
       gtk_range_set_range (GTK_RANGE (data->slider), 0, (gdouble)data->duration / GST_SECOND);
@@ -347,6 +352,9 @@ static void application_cb (GstBus *bus, GstMessage *msg, CustomData *data) {
 static void eos_cb (GstBus *bus, GstMessage *msg, CustomData *data) {
   g_print ("End-Of-Stream reached.\n");
   gst_element_set_state (data->playbin, GST_STATE_READY);
+  gst_element_set_state (data->playbin, GST_STATE_NULL);
+  g_timeout_add_seconds (10, (GSourceFunc) rtsp_client, data);
+  gst_element_set_state (data->playbin2, GST_STATE_PLAYING); 
 }
 
 /* This function is called when the pipeline changes states. We use it to
@@ -359,8 +367,16 @@ static void state_changed_cb (GstBus *bus, GstMessage *msg, CustomData *data) {
     g_print ("State set to %s\n", gst_element_state_get_name (new_state));
     if (old_state == GST_STATE_READY && new_state == GST_STATE_PAUSED) {
       /* For extra responsiveness, we refresh the GUI as soon as we reach the PAUSED state */
-      refresh_ui (data);
+      //refresh_ui (data);
     }
+  }
+  if (new_state == GST_STATE_PLAYING)
+  {
+   gst_element_set_state (data->playbin2, GST_STATE_PAUSED);
+  }
+  if (new_state == GST_STATE_PAUSED || new_state == GST_STATE_READY )
+   {
+   gst_element_set_state (data->playbin2, GST_STATE_PLAYING);
   }
 }
 
@@ -369,20 +385,46 @@ static void error_cb (GstBus *bus, GstMessage *msg, CustomData *data) {
   GError *err;
   gchar *debug_info;
   GstStateChangeReturn ret;
-  gchar *pipe_desc;
+  char *err_elem;
+  char *err_msg;
   GError *error=NULL;
+
+
+  /* Set the pipeline to READY (which stops playback) */
+//  gst_element_set_state (data->playbin2, GST_STATE_READY);
+//  gst_element_set_state (data->playbin2, GST_STATE_NULL);
+  gst_element_set_state (data->playbin, GST_STATE_READY);
+//  gst_element_set_state (data->playbin, GST_STATE_NULL);
+
 
   /* Print error details on the screen */
   gst_message_parse_error (msg, &err, &debug_info);
+  err_elem=GST_OBJECT_NAME(msg->src);
+  err_msg=err->message;
+
+  if ((strncmp (err_elem, "rtspsrc",7) ==0)) 
+  {
+    g_printerr ("Rtspsrc detected");
+    /* Stop program */
+    //gtk_main_quit();
+    gst_element_set_state (data->playbin, GST_STATE_NULL);
+
+    /* Set pipeline 2 to playing state */
+    gst_element_set_state (data->playbin2, GST_STATE_PLAYING);
+
+    g_timeout_add_seconds (10, (GSourceFunc) rtsp_client, data);
+    if (strncmp (debug_info, "gstrtspsrc.c(4825)",18)==0)
+    {
+     //gst_element_set_state (data->playbin, GST_STATE_NULL);
+    }
+  }
+
   g_printerr ("Error received from element %s: %s\n", GST_OBJECT_NAME (msg->src), err->message);
   g_printerr ("Debugging information: %s\n", debug_info ? debug_info : "none");
   g_clear_error (&err);
   g_free (debug_info);
-
-  /* Set the pipeline to READY (which stops playback) */
-  gst_element_set_state (data->playbin, GST_STATE_READY);
- // gst_element_set_state (data->playbin, GST_STATE_NULL);
 }
+
 
 /* This thread handles the startup and running of the rtsp server side */
 void rtsp_server(void)
@@ -427,38 +469,102 @@ void rtsp_server(void)
   g_print ("stream ready at rtsp://10.252.61.91:%s/test\n", port);
 }
 
+static gboolean start_streaming (CustomData *data)
+{
+  GstStateChangeReturn ret;
+
+  /* Start playing */
+  ret=gst_element_set_state (data->playbin, GST_STATE_PLAYING);
+  if (ret==GST_STATE_CHANGE_FAILURE) {
+    g_printerr ("Unable to set the pipeline to the playing state.\n");
+    gst_object_unref (data->playbin);
+    return;
+  }
+ //window_handle2=NULL;
+// gst_element_set_state (data->playbin2, GST_STATE_READY);
+// data->playbin2=NULL;
+// data->bus2=NULL;
+
+/* return FALSE to make sure function is only called once */
+ return FALSE;
+}
+
+static gboolean rtsp_client (CustomData *data)
+{
+  GError *error=NULL;
+  GstStateChangeReturn ret;
+  gchar *pipe_desc;
+
+//  gst_object_unref(data->playbin);
+  //gst_object_unref(data->bus);
+  data->playbin=NULL;
+//  data->bus=NULL;
+
+
+  g_print ("Start client stream ! ");
+
+  /* Create the elements */
+  pipe_desc= g_strdup_printf ("rtspsrc location=rtsp://10.252.61.135:8554/test latency=0 do-retransmission=false user-id=user user-pw=password ! queue name=q ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false"); 
+ // pipe_desc= g_strdup_printf ("rtspsrc location=rtsp://169.254.197.5:8554/test latency=0 do-retransmission=false user-id=user user-pw=password ! queue name=q ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false"); 
+  data->playbin=gst_parse_launch(pipe_desc, &error);
+  g_free(pipe_desc);
+  /* Instruct the bus to emit signals for each received message, and connect to the interesting signals */
+  data->bus = gst_element_get_bus (data->playbin);
+  gst_bus_set_sync_handler (data->bus, (GstBusSyncHandler) bus_sync_handler, NULL, NULL);
+
+  gst_bus_add_signal_watch (data->bus);
+  g_signal_connect (G_OBJECT (data->bus), "message::error", (GCallback)error_cb, data);
+  g_signal_connect (G_OBJECT (data->bus), "message::eos", (GCallback)eos_cb, data);
+  g_signal_connect (G_OBJECT (data->bus), "message::state-changed", (GCallback)state_changed_cb, data);
+  g_signal_connect (G_OBJECT (data->bus), "message::application", (GCallback)application_cb, data);
+
+  gst_object_unref (data->bus);
+  /* Start playing */
+  ret=gst_element_set_state (data->playbin, GST_STATE_PLAYING);
+  if (ret==GST_STATE_CHANGE_FAILURE) {
+    g_printerr ("Unable to set the pipeline to the playing state.\n");
+    gst_object_unref (data->playbin);
+    return;
+  }
+  /* return FALSE to make sure function is only called once */
+  return FALSE;
+}
 
 int main(int argc, char *argv[]) {
   CustomData data;
   GstStateChangeReturn ret;
   //GstBus *bus;
   gchar *pipe_desc;
+  gchar *pipe_desc2;
   GError *error=NULL;
   GstMessage *msg;
-  pthread_t rtsp_server_thread;
+  pthread_t rtsp_server_thread, rtsp_client_thread;
 
- 
- /* Initialize GTK */
+XInitThreads();
+
+  /* Initialize GTK */
   gtk_init (&argc, &argv);
 
   /* Initialize GStreamer */
   gst_init (&argc, &argv);
 
+  /* Start rtsp-server-thread */
+  //  pthread_create ( &rtsp_server_thread, NULL, (void* )rtsp_server, NULL );
+
   /* Initialize our data structure */
   memset (&data, 0, sizeof (data));
   data.duration = GST_CLOCK_TIME_NONE;
-  
-   /* Start rtsp-server-thread */
-//  pthread_create ( &rtsp_server_thread, NULL, (void* )rtsp_server, NULL );
-
 
   /* Create the elements */
-  //pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test  latency=0 ! rtpjitterbuffer latency=2 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=24/1' ! omxh264dec ! glimagesink sync=false");
- // pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test  latency=0 ! rtpjitterbuffer latency=2 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=90/1' ! omxh264dec ! glimagesink sync=false");
-  pipe_desc= g_strdup_printf("rtspsrc location=rtsp://169.254.197.5:8554/test latency=0 do-retransmission=false user-id=user user-pw=password ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false");
- // pipe_desc= g_strdup_printf("rtspsrc location=rtsp://10.252.61.135:8554/test latency=0 do-retransmission=false user-id=user user-pw=password ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false");
+  pipe_desc= g_strdup_printf ("rtspsrc location=rtsp://10.252.61.135:8554/test latency=0 do-retransmission=false user-id=user user-pw=password ! queue name=q ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false"); 
+  pipe_desc= g_strdup_printf ("rtspsrc location=rtsp://169.254.197.5:8554/test latency=0 do-retransmission=false user-id=user user-pw=password ! queue name=q ! rtpjitterbuffer latency=10 drop-on-latency=true mode=2 ! application/x-rtp, encoding-name=H264 ! rtph264depay ! h264parse ! capsfilter caps='video/x-h264, stream-format=byte-stream, frame-rate=30/1' ! omxh264dec ! glimagesink sync=false async=false"); 
   data.playbin=gst_parse_launch(pipe_desc, &error);
   g_free(pipe_desc);
+
+  error=NULL;
+  pipe_desc2= g_strdup_printf ("videotestsrc pattern=1 ! glimagesink ");
+  data.playbin2=gst_parse_launch(pipe_desc2, &error);
+  g_free(pipe_desc2);
 
   /* Create the GUI */
   create_ui (&data);
@@ -473,22 +579,33 @@ int main(int argc, char *argv[]) {
   g_signal_connect (G_OBJECT (data.bus), "message::state-changed", (GCallback)state_changed_cb, &data);
   g_signal_connect (G_OBJECT (data.bus), "message::application", (GCallback)application_cb, &data);
 
-  g_signal_connect (G_OBJECT (data.bus), "message::latency", (GCallback)clock_lost_cb, &data);
-  g_signal_connect (G_OBJECT (data.bus), "message::unknown", (GCallback)buffering_cb, &data);
-
   gst_object_unref (data.bus);
 
+  /* Instruct the bus to emit signals for each received message, and connect to the interesting signals */
+  data.bus2 = gst_element_get_bus (data.playbin2);
+  gst_bus_set_sync_handler (data.bus2, (GstBusSyncHandler) bus_sync_handler, NULL, NULL);
+
+  gst_object_unref (data.bus2);
+
+  /* Monitor if pipeline is alive -> monitor "underrun" signal from queue element*/
+  //  data.queue= gst_bin_get_by_name(data.playbin, "q");
+  //  g_signal_connect (data.queue, "underrun", G_CALLBACK(underrun_handler), &data);
+  //  g_signal_connect (data.queue, "running", G_CALLBACK(running_handler), &data);
+
+
   /* Start playing */
-  ret=gst_element_set_state (data.playbin, GST_STATE_PLAYING);
+  ret=gst_element_set_state (data.playbin2, GST_STATE_PLAYING);
   if (ret==GST_STATE_CHANGE_FAILURE) {
     g_printerr ("Unable to set the pipeline to the playing state.\n");
-    gst_object_unref (data.playbin);
-
-    return -1;
+    gst_object_unref (data.playbin2);
+    return;
   }
 
   /* Register a function that GLib will call every second */
-  g_timeout_add_seconds (1, (GSourceFunc)refresh_ui, &data);
+  //g_timeout_add_seconds (1, (GSourceFunc)refresh_ui, &data);
+
+  /* Register a function that GLib will call once after 10 seconds */
+  g_timeout_add_seconds (10, (GSourceFunc) rtsp_client, &data);
 
   /* Start the GTK main loop. We will not regain control until gtk_main_quit is called. */
   gtk_main ();
@@ -496,6 +613,7 @@ int main(int argc, char *argv[]) {
   /* Free resources */
   gst_element_set_state (data.playbin, GST_STATE_NULL);
   gst_object_unref (data.playbin);
-
- return 0;
+  gst_element_set_state (data.playbin2, GST_STATE_NULL);
+  gst_object_unref (data.playbin2);
+  return 0;
 }
